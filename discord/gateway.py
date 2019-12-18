@@ -30,7 +30,7 @@ import websockets
 import asyncio
 import aiohttp
 from . import utils, compat
-from .enums import Status, try_enum
+from .enums import Status, try_enum, SpeakingState
 from .game import Game
 from .errors import GatewayNotFound, ConnectionClosed, InvalidArgument
 import logging
@@ -538,6 +538,18 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         Receive only. Gives you the secret key required for voice.
     SPEAKING
         Send only. Notifies the client if you are currently speaking.
+    HEARTBEAT_ACK
+        Receive only. Tells you your heartbeat has been acknowledged.
+    RESUME
+        Sent only. Tells the client to resume its session.
+    HELLO
+        Receive only. Tells you that your websocket connection was acknowledged.
+    INVALIDATE_SESSION
+        Sent only. Tells you that your RESUME request has failed and to re-IDENTIFY.
+    CLIENT_CONNECT
+        Indicates a user has connected to voice.
+    CLIENT_DISCONNECT
+        Receive only.  Indicates a user has disconnected from voice.
     """
 
     IDENTIFY            = 0
@@ -546,7 +558,12 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
     HEARTBEAT           = 3
     SESSION_DESCRIPTION = 4
     SPEAKING            = 5
+    HEARTBEAT_ACK       = 6
+    RESUME              = 7
     HELLO               = 8
+    INVALIDATE_SESSION  = 9
+    CLIENT_CONNECT      = 12
+    CLIENT_DISCONNECT   = 13
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -561,7 +578,7 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
     @asyncio.coroutine
     def from_client(cls, client):
         """Creates a voice websocket for the :class:`VoiceClient`."""
-        gateway = 'wss://' + client.endpoint
+        gateway = 'wss://' + client.endpoint + '/?v=4'
         try:
             ws = yield from asyncio.wait_for(
                     _ensure_coroutine_connect(gateway, loop=client.loop, klass=cls),
@@ -597,7 +614,7 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         return ws
 
     @asyncio.coroutine
-    def select_protocol(self, ip, port):
+    def select_protocol(self, ip, port, mode):
         payload = {
             'op': self.SELECT_PROTOCOL,
             'd': {
@@ -605,7 +622,7 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
                 'data': {
                     'address': ip,
                     'port': port,
-                    'mode': 'xsalsa20_poly1305'
+                    'mode': mode
                 }
             }
         }
@@ -614,17 +631,28 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         log.debug('Selected protocol as {}'.format(payload))
 
     @asyncio.coroutine
-    def speak(self, is_speaking=True):
+    def client_connect(self):
+        payload = {
+            'op': self.CLIENT_CONNECT,
+            'd': {
+                'audio_ssrc': self._connection.ssrc
+            }
+        }
+
+        yield from self.send_as_json(payload)
+
+    @asyncio.coroutine
+    def speak(self, state=SpeakingState.voice):
         payload = {
             'op': self.SPEAKING,
             'd': {
-                'speaking': is_speaking,
+                'speaking': int(state),
                 'delay': 0
             }
         }
 
         yield from self.send_as_json(payload)
-        log.debug('Voice speaking now set to {}'.format(is_speaking))
+        log.debug('Voice speaking now set to {}'.format(state))
 
     @asyncio.coroutine
     def received_message(self, msg):
@@ -633,12 +661,16 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         data = msg.get('d')
 
         if op == self.READY:
+            yield from self.initial_connection(data)
+        elif op == self.HEARTBEAT_ACK:
+            self._keep_alive.ack()
+        elif op == self.SESSION_DESCRIPTION:
+            self._connection.mode = data['mode']
+            yield from self.load_secret_key(data)
+        elif op == self.HELLO:
             interval = data['heartbeat_interval'] / 1000.0
             self._keep_alive = VoiceKeepAliveHandler(ws=self, interval=interval)
             self._keep_alive.start()
-            yield from self.initial_connection(data)
-        elif op == self.SESSION_DESCRIPTION:
-            yield from self.load_secret_key(data)
 
     @asyncio.coroutine
     def initial_connection(self, data):
@@ -662,14 +694,23 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         state.port = struct.unpack_from('<H', recv, len(recv) - 2)[0]
 
         log.debug('detected ip: {0.ip} port: {0.port}'.format(state))
-        yield from self.select_protocol(state.ip, state.port)
-        log.info('selected the voice protocol for use')
+
+        # there *should* always be at least one supported mode (xsalsa20_poly1305)
+        modes = [mode for mode in data['modes'] if mode in self._connection.supported_modes]
+        log.debug('received supported encryption modes: %s', ", ".join(modes))
+
+        mode = modes[0]
+        yield from self.select_protocol(state.ip, state.port, mode)
+        log.info('selected the voice protocol for use (%s)', mode)
+
+        yield from self.client_connect()
 
     @asyncio.coroutine
     def load_secret_key(self, data):
         log.info('received secret key for voice connection')
         self._connection.secret_key = data.get('secret_key')
         yield from self.speak()
+        yield from self.speak(False)
 
     @asyncio.coroutine
     def poll_event(self):

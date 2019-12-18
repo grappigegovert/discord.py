@@ -24,7 +24,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from enum import Enum
+from enum import Enum, IntEnum
 
 class ChannelType(Enum):
     text    = 0
@@ -57,12 +57,27 @@ class ServerRegion(Enum):
     amsterdam     = 'amsterdam'
     frankfurt     = 'frankfurt'
     brazil        = 'brazil'
+    hongkong      = 'hongkong'
+    russia        = 'russia'
+    japan         = 'japan'
+    southafrica   = 'southafrica'
+    india         = 'india'
+    europe        = 'europe'
     vip_us_east   = 'vip-us-east'
     vip_us_west   = 'vip-us-west'
     vip_amsterdam = 'vip-amsterdam'
 
     def __str__(self):
         return self.value
+
+class SpeakingState(IntEnum):
+    none       = 0
+    voice      = 1
+    soundshare = 2
+    priority   = 4
+
+    def __str__(self):
+        return self.name
 
 class VerificationLevel(Enum):
     none       = 0

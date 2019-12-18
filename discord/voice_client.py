@@ -66,18 +66,19 @@ from .gateway import *
 from .errors import ClientException, InvalidArgument, ConnectionClosed
 
 class StreamPlayer(threading.Thread):
-    def __init__(self, stream, encoder, connected, player, after, **kwargs):
+    def __init__(self, stream, client, after, **kwargs):
         threading.Thread.__init__(self, **kwargs)
+        self.client = client
         self.daemon = True
         self.buff = stream
-        self.frame_size = encoder.frame_size
-        self.player = player
+        self.frame_size = client.encoder.frame_size
+        self.player = client.play_audio
         self._end = threading.Event()
         self._resumed = threading.Event()
         self._resumed.set() # we are not paused
-        self._connected = connected
+        self._connected = client._connected
         self.after = after
-        self.delay = encoder.frame_length / 1000.0
+        self.delay = client.encoder.frame_length / 1000.0
         self._volume = 1.0
         self._current_error = None
 
@@ -87,6 +88,7 @@ class StreamPlayer(threading.Thread):
     def _do_run(self):
         self.loops = 0
         self._start = time.time()
+        self._speak(True)
         while not self._end.is_set():
             # are we paused?
             if not self._resumed.is_set():
@@ -139,6 +141,7 @@ class StreamPlayer(threading.Thread):
 
     def stop(self):
         self._end.set()
+        self._speak(False)
 
     @property
     def error(self):
@@ -152,13 +155,17 @@ class StreamPlayer(threading.Thread):
     def volume(self, value):
         self._volume = max(value, 0.0)
 
-    def pause(self):
+    def pause(self, *, update_speaking=True):
         self._resumed.clear()
+        if update_speaking:
+            self._speak(False)
 
-    def resume(self):
+    def resume(self, *, update_speaking=True):
         self.loops = 0
         self._start = time.time()
         self._resumed.set()
+        if update_speaking:
+            self._speak(True)
 
     def is_playing(self):
         return self._resumed.is_set() and not self.is_done()
@@ -166,10 +173,16 @@ class StreamPlayer(threading.Thread):
     def is_done(self):
         return not self._connected.is_set() or self._end.is_set()
 
+
+    def _speak(self, speaking):
+        try:
+            asyncio.run_coroutine_threadsafe(self.client.ws.speak(speaking), self.client.loop)
+        except Exception as e:
+            log.info("Speaking call in player failed: %s", e)
+
 class ProcessPlayer(StreamPlayer):
     def __init__(self, process, client, after, **kwargs):
-        super().__init__(process.stdout, client.encoder,
-                         client._connected, client.play_audio, after, **kwargs)
+        super().__init__(process.stdout, client, after, **kwargs)
         self.process = process
 
     def run(self):
@@ -228,9 +241,14 @@ class VoiceClient:
         self.sequence = 0
         self.timestamp = 0
         self.encoder = opus.Encoder(48000, 2)
+        self.mode = None
         log.info('created opus encoder with {0.__dict__}'.format(self.encoder))
 
     warn_nacl = not has_nacl
+    supported_modes = (
+        'xsalsa20_poly1305_suffix',
+        'xsalsa20_poly1305',
+    )
 
     @property
     def server(self):
@@ -333,21 +351,32 @@ class VoiceClient:
 
     def _get_voice_packet(self, data):
         header = bytearray(12)
-        nonce = bytearray(24)
-        box = nacl.secret.SecretBox(bytes(self.secret_key))
 
-        # Formulate header
+        # Formulate rtp header
         header[0] = 0x80
         header[1] = 0x78
         struct.pack_into('>H', header, 2, self.sequence)
         struct.pack_into('>I', header, 4, self.timestamp)
         struct.pack_into('>I', header, 8, self.ssrc)
 
+        encrypt_packet = getattr(self, '_encrypt_' + self.mode)
+        return encrypt_packet(header, data)
+
+    def _encrypt_xsalsa20_poly1305(self, header, data):
+        box = nacl.secret.SecretBox(bytes(self.secret_key))
+        nonce = bytearray(24)
+
         # Copy header to nonce's first 12 bytes
         nonce[:12] = header
 
         # Encrypt and return the data
         return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext
+
+    def _encrypt_xsalsa20_poly1305_suffix(self, header, data):
+        box = nacl.secret.SecretBox(bytes(self.secret_key))
+        nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
+
+        return header + box.encrypt(bytes(data), nonce).ciphertext + nonce
 
     def create_ffmpeg_player(self, filename, *, use_avconv=False, pipe=False, stderr=None, options=None, before_options=None, headers=None, after=None):
         """Creates a stream player for ffmpeg that launches in a separate thread to play
@@ -659,7 +688,7 @@ class VoiceClient:
         StreamPlayer
             A stream player with the operations noted above.
         """
-        return StreamPlayer(stream, self.encoder, self._connected, self.play_audio, after)
+        return StreamPlayer(stream, self, after)
 
     def play_audio(self, data, *, encode=True):
         """Sends an audio packet composed of the data.
