@@ -689,9 +689,7 @@ class DiscordVoiceWebSocket(websockets.client.WebSocketClientProtocol):
         ip_end = recv.index(0, ip_start)
         state.ip = recv[ip_start:ip_end].decode('ascii')
 
-        # the port is a little endian unsigned short in the last two bytes
-        # yes, this is different endianness from everything else
-        state.port = struct.unpack_from('<H', recv, len(recv) - 2)[0]
+        state.port = struct.unpack_from('>H', recv, len(recv) - 2)[0]
 
         log.debug('detected ip: {0.ip} port: {0.port}'.format(state))
 
