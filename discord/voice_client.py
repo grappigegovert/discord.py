@@ -242,10 +242,12 @@ class VoiceClient:
         self.timestamp = 0
         self.encoder = opus.Encoder(48000, 2)
         self.mode = None
+        self._lite_nonce = 0
         log.info('created opus encoder with {0.__dict__}'.format(self.encoder))
 
     warn_nacl = not has_nacl
     supported_modes = (
+        'xsalsa20_poly1305_lite',
         'xsalsa20_poly1305_suffix',
         'xsalsa20_poly1305',
     )
@@ -377,6 +379,15 @@ class VoiceClient:
         nonce = nacl.utils.random(nacl.secret.SecretBox.NONCE_SIZE)
 
         return header + box.encrypt(bytes(data), nonce).ciphertext + nonce
+
+    def _encrypt_xsalsa20_poly1305_lite(self, header, data):
+        box = nacl.secret.SecretBox(bytes(self.secret_key))
+        nonce = bytearray(24)
+
+        nonce[:4] = struct.pack('>I', self._lite_nonce)
+        self.checked_add('_lite_nonce', 1, 4294967295)
+
+        return header + box.encrypt(bytes(data), bytes(nonce)).ciphertext + nonce[:4]
 
     def create_ffmpeg_player(self, filename, *, use_avconv=False, pipe=False, stderr=None, options=None, before_options=None, headers=None, after=None):
         """Creates a stream player for ffmpeg that launches in a separate thread to play
