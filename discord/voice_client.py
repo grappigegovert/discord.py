@@ -295,7 +295,10 @@ class VoiceClient:
             try:
                 yield from self.ws.poll_event()
             except ConnectionClosed as e:
-                if e.code == 1000:
+                # 1000 - normal closure (obviously)
+                # 4014 - voice channel has been deleted.
+                # 4015 - voice server has crashed
+                if e.code in (1000, 4014, 4015):
                     break
                 else:
                     raise
