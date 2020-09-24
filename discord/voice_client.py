@@ -268,7 +268,7 @@ class VoiceClient:
     @asyncio.coroutine
     def connect(self):
         log.info('voice connection is connecting...')
-        self.endpoint = self.endpoint.replace(':80', '')
+        self.endpoint, _, _ = self.endpoint.rpartition(':')
         self.endpoint_ip = socket.gethostbyname(self.endpoint)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setblocking(False)
